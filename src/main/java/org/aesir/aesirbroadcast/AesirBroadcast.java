@@ -10,7 +10,6 @@ import com.velocitypowered.api.proxy.Player;
 import com.velocitypowered.api.proxy.ProxyServer;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.event.ClickEvent;
-import net.kyori.adventure.text.format.TextColor;
 import net.kyori.adventure.title.Title;
 import org.slf4j.Logger;
 import org.yaml.snakeyaml.Yaml;
@@ -22,7 +21,6 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
-import java.io.*;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -37,7 +35,8 @@ public class AesirBroadcast {
     private String titleMessage;
     private String titleMainMessage;
     private String customTitleMainMessage;
-    private final String broadcastURL = "https://store.aesirmc.com";
+    private String hoverMessage; // Hover message for broadcast texts.
+    private String broadcastURL; // URL to open when clicking broadcast messages.
     private String youtubeApiKey;
     private String youtubeChannelId;
     private int youtubeCheckInterval;
@@ -55,40 +54,71 @@ public class AesirBroadcast {
         this.configPath = dataDirectory.resolve("config.yml");
     }
 
-    // Plugin başlatıldığında çağrılır ve komutları kaydeder
+    // Called when the plugin is initialized; registers commands and starts the YouTube live checker.
     @Subscribe
     public void onProxyInitialization(ProxyInitializeEvent event) {
-        loadConfig(); // Konfigürasyon dosyasını yükler
+        loadConfig(); // Load configuration file.
         server.getCommandManager().register("ab", new AesirBroadcastCommand(), "aesirbroadcast");
         startYouTubeLiveChecker();
-
     }
 
-    // Konfigürasyon dosyasını okur ve yükler
+    // Reads and loads the configuration file.
     private void loadConfig() {
         try {
-            Files.createDirectories(configPath.getParent()); // Eğer dizin yoksa oluştur
+            Files.createDirectories(configPath.getParent()); // Create directory if it doesn't exist.
             if (!Files.exists(configPath)) {
-                // Varsayılan konfigürasyon dosyasını oluşturur
+                // Create a default configuration file with detailed comments explaining each setting.
                 String defaultConfig = """
+                # Broadcast: List of messages that will be sent to players.
+                # These messages are used when a live broadcast is detected or when a broadcast command is executed.
                 Broadcast:
                   - "&aAesirMC is now live!"
                   - "&bJoin the adventure now!"
+                
+                # TitleMainMessage: The main title message displayed on players' screens.
+                # This appears as the primary title when the title command is used.
                 TitleMainMessage: "<red>Announcement!</red>"
+                
+                # CustomTitleMainMessage: The main section of the title for custom messages.
+                # This is used when executing the /ab ozeltitle command.
                 CustomTitleMainMessage: "<blue>Custom Announcement!</blue>"
+                
+                # TitleMessage: The subtitle text that appears beneath the main title.
                 TitleMessage: "<green>AesirMC is now live!</green>"
+                
+                # TitleFadeIn: Duration (in seconds) for the title to fade in.
                 TitleFadeIn: 1
+                
+                # TitleStay: Duration (in seconds) for which the title remains on the screen.
                 TitleStay: 3
+                
+                # TitleFadeOut: Duration (in seconds) for the title to fade out.
                 TitleFadeOut: 1
+                
+                # BroadcastInterval: Interval (in seconds) between automatic broadcast messages
+                # when using the broadcaststart command.
                 BroadcastInterval: 900
+                
+                # YouTubeAPIKey: Your YouTube API key, required to check the live stream status.
                 YouTubeAPIKey: "YOUR_YOUTUBE_API_KEY"
+                
+                # YouTubeChannelID: Your YouTube channel ID, used to verify the live stream status via the API.
                 YouTubeChannelID: "YOUR_CHANNEL_ID"
+                
+                # YouTubeCheckInterval: Interval (in seconds) at which the plugin checks if your YouTube channel is live.
                 YouTubeCheckInterval: 60
+                
+                # HoverMessage: The message shown when a player hovers over a broadcast message.
+                # Supports MiniMessage formatting.
+                HoverMessage: "Click <red>here</red> for more details!"
+                
+                # BroadcastURL: The URL that opens when a player clicks on the broadcast message.
+                BroadcastURL: "https://store.aesirmc.com"
                 """;
                 Files.write(configPath, defaultConfig.getBytes(), StandardOpenOption.CREATE);
             }
 
-            // YAML dosyasını okur ve değerlere atar
+            // Load configuration from YAML.
             @SuppressWarnings("unchecked")
             Yaml yaml = new Yaml();
             Map<String, Object> config = yaml.load(Files.newBufferedReader(configPath));
@@ -115,15 +145,19 @@ public class AesirBroadcast {
             youtubeApiKey = (String) config.getOrDefault("YouTubeAPIKey", "YOUR_YOUTUBE_API_KEY");
             youtubeChannelId = (String) config.getOrDefault("YouTubeChannelID", "YOUR_CHANNEL_ID");
             youtubeCheckInterval = (int) config.getOrDefault("YouTubeCheckInterval", 60);
+            hoverMessage = (String) config.getOrDefault("HoverMessage", "Click here for more details!");
+            broadcastURL = (String) config.getOrDefault("BroadcastURL", "https://store.aesirmc.com");
             logger.info("Configuration reloaded successfully.");
         } catch (IOException e) {
             logger.error("Error loading configuration file!", e);
             broadcastMessages = List.of("AesirMC is now live!");
             titleMessage = "Announcement! AesirMC is now live!";
+            hoverMessage = "Click here for more details!";
+            broadcastURL = "https://store.aesirmc.com";
         }
     }
 
-    // /ab komutunu yöneten sınıf
+    // Starts a task that periodically checks if the YouTube channel is live.
     private void startYouTubeLiveChecker() {
         server.getScheduler().buildTask(this, () -> {
             boolean currentlyLive = checkIfLiveOnYouTube();
@@ -137,10 +171,28 @@ public class AesirBroadcast {
     }
 
     private boolean checkIfLiveOnYouTube() {
+        HttpURLConnection conn = null;
         try {
-            URL url = new URL("https://www.googleapis.com/youtube/v3/search?part=snippet&channelId=" + youtubeChannelId + "&type=video&eventType=live&key=" + youtubeApiKey);
-            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            URL url = new URL("https://www.googleapis.com/youtube/v3/search?part=snippet&channelId="
+                    + youtubeChannelId + "&type=video&eventType=live&key=" + youtubeApiKey);
+            conn = (HttpURLConnection) url.openConnection();
             conn.setRequestMethod("GET");
+            // Add a user agent to the request.
+            conn.setRequestProperty("User-Agent", "Mozilla/5.0");
+
+            int responseCode = conn.getResponseCode();
+            if (responseCode != HttpURLConnection.HTTP_OK) {
+                // If not OK, read the error stream for details.
+                BufferedReader err = new BufferedReader(new InputStreamReader(conn.getErrorStream()));
+                String line;
+                StringBuilder errorResponse = new StringBuilder();
+                while ((line = err.readLine()) != null) {
+                    errorResponse.append(line);
+                }
+                err.close();
+                logger.error("Error checking YouTube live status: {} - {}", responseCode, errorResponse.toString());
+                return false;
+            }
 
             BufferedReader in = new BufferedReader(new InputStreamReader(conn.getInputStream()));
             String inputLine;
@@ -159,7 +211,10 @@ public class AesirBroadcast {
     private void broadcastYouTubeLive() {
         for (String message : broadcastMessages) {
             Component component = net.kyori.adventure.text.minimessage.MiniMessage.miniMessage().deserialize(message)
-                    .clickEvent(ClickEvent.openUrl("https://www.youtube.com/channel/" + youtubeChannelId));
+                    .hoverEvent(net.kyori.adventure.text.event.HoverEvent.showText(
+                            net.kyori.adventure.text.minimessage.MiniMessage.miniMessage().deserialize(hoverMessage)
+                    ))
+                    .clickEvent(ClickEvent.openUrl(broadcastURL));
             server.getAllPlayers().forEach(p -> p.sendMessage(component));
         }
         logger.info("Broadcasting YouTube live event to players.");
@@ -171,7 +226,6 @@ public class AesirBroadcast {
             if (invocation.arguments().length == 0) {
                 return List.of("broadcast", "title", "reload", "ozeltitle");
             }
-
             String subcommand = invocation.arguments()[0].toLowerCase();
             if (subcommand.equals("ozeltitle") && invocation.arguments().length == 1) {
                 return List.of("<your_message_here>");
@@ -181,10 +235,9 @@ public class AesirBroadcast {
         @Override
         public void execute(Invocation invocation) {
             if (invocation.arguments().length == 0) {
-                invocation.source().sendMessage(Component.text("Usage: /ab <broadcast|title|reload>"));
+                invocation.source().sendMessage(Component.text("Usage: /ab <broadcast|title|reload|ozeltitle>"));
                 return;
             }
-
             String subcommand = invocation.arguments()[0].toLowerCase();
             switch (subcommand) {
                 case "broadcaststart":
@@ -201,6 +254,9 @@ public class AesirBroadcast {
                         if (isBroadcastRunning) {
                             for (String message : broadcastMessages) {
                                 Component component = net.kyori.adventure.text.minimessage.MiniMessage.miniMessage().deserialize(message)
+                                        .hoverEvent(net.kyori.adventure.text.event.HoverEvent.showText(
+                                                net.kyori.adventure.text.minimessage.MiniMessage.miniMessage().deserialize(hoverMessage)
+                                        ))
                                         .clickEvent(ClickEvent.openUrl(broadcastURL));
                                 server.getAllPlayers().forEach(p -> p.sendMessage(component));
                             }
@@ -209,7 +265,6 @@ public class AesirBroadcast {
                     }).repeat(Duration.ofSeconds(broadcastInterval)).schedule();
                     invocation.source().sendMessage(Component.text("Broadcast started every " + broadcastInterval + " seconds."));
                     break;
-
                 case "broadcaststop":
                     if (invocation.source() instanceof Player player && !player.hasPermission("aesirbroadcast.broadcaststop")) {
                         player.sendMessage(Component.text("You do not have permission to use this command!"));
@@ -223,44 +278,39 @@ public class AesirBroadcast {
                     invocation.source().sendMessage(Component.text("Broadcast stopped."));
                     break;
                 case "broadcast":
-                    // Oyuncunun yetkisi olup olmadığını kontrol eder
                     if (invocation.source() instanceof Player player && !player.hasPermission("aesirbroadcast.broadcast")) {
                         player.sendMessage(Component.text("You do not have permission to use this command!"));
                         return;
                     }
-                    // Broadcast mesajlarını tüm oyunculara gönderir
                     for (String message : broadcastMessages) {
                         Component component = net.kyori.adventure.text.minimessage.MiniMessage.miniMessage().deserialize(message)
+                                .hoverEvent(net.kyori.adventure.text.event.HoverEvent.showText(
+                                        net.kyori.adventure.text.minimessage.MiniMessage.miniMessage().deserialize(hoverMessage)
+                                ))
                                 .clickEvent(ClickEvent.openUrl(broadcastURL));
                         server.getAllPlayers().forEach(p -> p.sendMessage(component));
                     }
                     logger.info("Broadcast messages sent: " + broadcastMessages);
                     break;
-
                 case "title":
-                    // Oyuncunun yetkisi olup olmadığını kontrol eder
                     if (invocation.source() instanceof Player player && !player.hasPermission("aesirbroadcast.title")) {
                         player.sendMessage(Component.text("You do not have permission to use this command!"));
                         return;
                     }
-                    // Title mesajını tüm oyunculara gönderir
                     Component title = net.kyori.adventure.text.minimessage.MiniMessage.miniMessage().deserialize(titleMainMessage);
                     Component subtitle = net.kyori.adventure.text.minimessage.MiniMessage.miniMessage().deserialize(titleMessage);
                     Title velocityTitle = Title.title(title, subtitle, Title.Times.of(Duration.ofSeconds(titleFadeIn), Duration.ofSeconds(titleStay), Duration.ofSeconds(titleFadeOut)));
                     server.getAllPlayers().forEach(p -> p.showTitle(velocityTitle));
                     logger.info("Title message sent: " + titleMessage);
                     break;
-
                 case "reload":
-                    // Oyuncunun yetkisi olup olmadığını kontrol eder
                     if (invocation.source() instanceof Player player && !player.hasPermission("aesirbroadcast.reload")) {
                         player.sendMessage(Component.text("You do not have permission to use this command!"));
                         return;
                     }
-                    loadConfig(); // Konfigürasyonu yeniden yükler
+                    loadConfig();
                     invocation.source().sendMessage(Component.text("Configuration reloaded successfully!"));
                     break;
-
                 case "ozeltitle":
                     if (invocation.arguments().length < 2) {
                         invocation.source().sendMessage(Component.text("Usage: /ab ozeltitle <message>"));
@@ -277,7 +327,6 @@ public class AesirBroadcast {
                     server.getAllPlayers().forEach(p -> p.showTitle(customVelocityTitle));
                     logger.info("Custom title sent: " + customTitleMessage);
                     break;
-
                 default:
                     invocation.source().sendMessage(Component.text("Unknown subcommand. Usage: /ab <broadcast|title|reload|ozeltitle>"));
                     break;
